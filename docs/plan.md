@@ -14,9 +14,9 @@ The Eno River at Hillsborough, NC (USGS 02085000, 66 sq mi) swings from a trickl
 - **R4** Five stages (ingest, features, train, forecast, dashboard) hand off only through files under `DATA_DIR` (default `./data`). No stage imports another stage's module.
 - **R5** Incremental ingest: after the first backfill, a run fetches only new days plus a short lookback window for revised provisional values.
 - **R6** Time-series discipline: chronological splits (train 2018-01-01..2023-12-31, calibration 2024-02-01..2024-12-31, test 2025-01-01 onward; January 2024 is unused). No feature uses information from after the issue time, with **one deliberate, documented exception, limited to training rows**: there, `precip_f2` and `precip_f3` come from Open-Meteo historical-forecast data, which is stitched from forecasts made about 0 days ahead, so they are better than a real 1- or 2-day-ahead forecast (D2, RK3). **Calibration and test rows use lead-matched forecasts** from the previous-runs archive (D20), so they contain only what was forecast at issue time. Flow, antecedent precipitation, and temperature features use nothing after d0.
-- **R14** Every "today", "yesterday", and "run date" is computed as `datetime.now(ZoneInfo(TIMEZONE)).date()`, never `date.today()` or UTC. Containers run in UTC, so at 8 pm ET UTC is already tomorrow.
+- **R14** Every "today", "yesterday", and "run date" is computed by `paths.local_today()`: `AS_OF_DATE` if it is set, otherwise `datetime.now(ZoneInfo(TIMEZONE)).date()`. Never `date.today()` or UTC; containers run in UTC, so at 8 pm ET UTC is already tomorrow. `AS_OF_DATE` is for fixture mode, smoke tests, and CI only; it is empty in production (D26).
 - **R7** Every forecast and every metrics report includes the persistence baseline (Q[d0+h] = Q[d0]).
-- **R8** One direct scikit-learn model per horizon. Intervals come from empirical residual quantiles on the calibration period.
+- **R8** One direct scikit-learn model per horizon. Intervals come from empirical residual quantiles on the calibration period. No model comparison, with **one pre-declared exception**: the single alternative that D23 allows, under D23's fixed selection rules.
 - **R9** A versioned checkpoint plus a JSON metrics sidecar, including skill vs persistence and interval coverage (overall and high-flow).
 - **R10** A Streamlit dashboard that reads only files under `DATA_DIR`.
 - **R11** All configuration comes from environment variables with documented defaults.
@@ -83,7 +83,7 @@ Locally, the same stages run one at a time with `make ingest`, `make features`, 
 
 ### Out of scope
 
-- Model comparison, hyperparameter search, deep learning, and ensembles of different model families.
+- Model comparison (except the single pre-declared alternative in D23, selected only on 2023), hyperparameter search, deep learning, and ensembles of different model families.
 - Sub-daily (instantaneous, 15-minute) data, other gauges, and upstream routing.
 - Flood-stage alerts, notifications, user accounts, and a public deployment/hosting setup.
 - Databases, message queues, object storage, cron daemons, or any service beyond the two Compose services.
@@ -140,8 +140,18 @@ Locally, the same stages run one at a time with `make ingest`, `make features`, 
 | D22 | With fewer than 3 forecast-rain days, Forecast refuses and writes nothing (AC-4.7 unchanged). Every horizon model keeps all three `precip_f` inputs (AC-3.2 unchanged). | Per-horizon rain inputs (the t+h model uses `precip_f1..fh` only), which would allow partial 1–2-row forecasts. | Student (kept the AI's recommendation; chose simplicity for now) | A truncated Open-Meteo response is rare (never seen during checks). Exactly 3 rows keeps the forecast file, the fan chart, and all downstream checks simple. The dashboard already shows the previous forecast as outdated. Can be revisited later. |
 | D23 | **Protocol if the model performs poorly**, fixed before any results are seen. (1) **Diagnose first:** check join dates, the target and band signs, the lead-matched coverage, that features match between training and forecasting, and the MRMS rain check (AC-2.9) for the failing periods: large misses on days where Open-Meteo rain disagrees with MRMS point to a weather-input problem, not the model; bugs are fixed to match the plan and don't count as model changes. (2) If the pipeline is correct and the model still fails AC-3.8 (no skill vs persistence) at any horizon, **at most one** alternative may be tried, chosen by the student and logged here as a new Student decision (e.g. `Ridge` on the same features, or per-horizon rain inputs from D22). (3) The alternative is judged **only on 2023** (the last training year, held out and refit afterward), never on the calibration period (it sets the bands) and **never on the 2025+ test split**. (4) Whatever is chosen is re-scored once on test and reported, including when it is still worse than persistence. No grid or random search. | Open-ended tuning; comparing several model families; selecting on test results. | Student (accepted the AI's recommendation after asking whether there is a plan to improve a poor model) | The brief forbids model comparison and hyperparameter search, so the default is to accept and report the result. Diagnosing first catches the more likely cause (a bug). Pre-committing the rules and keeping selection off the test split keeps the test score an honest estimate. Near-zero skill at t+1 is plausible, because flow barely changes on dry days. It is a result to report, not something to tune away. |
 | D24 | Use NOAA MRMS 24-hour multi-sensor QPE as a second, independent source of truth for rain, accessed through IEM's IEMRE API (`https://mesonet.agron.iastate.edu/iemre/multiday/{start}/{end}/{lat}/{lon}/json`, field `mrms_precip_in`, inches → mm). **Verification only:** it feeds the rain check (AC-2.9), the real-data alignment test (AC-2.5), and D23 diagnosis. It is **not** a model input. | NOAA's own archive on AWS (`noaa-mrms-pds`, `CONUS/MultiSensor_QPE_24H_Pass2_00.00/`: one 4.5 MB GRIB2 per hour, starting 2020-10-14, which would need eccodes/cfgrib and about 10 GB to backfill daily values); MRMS as antecedent-rain features. | Student chose MRMS as the second source of truth; AI chose the access path and the verification-only role | IEM returns small JSON point values back to at least 2018, so there are no GRIB2 dependencies or gigabyte downloads. Keeping MRMS out of the model avoids a new serve-time dependency and train/serve differences. The model's inputs stay exactly what the brief specifies. Evidence it is worth having: on 2026-09-18 Open-Meteo lead-0 said 51.5 mm, MRMS said 0.0 mm, and the gauge stayed flat. On Chantal (2025-07-06) MRMS said 7.01 in (178 mm) vs Open-Meteo's 54.7 mm, on the same day as the flow jump. |
-| D25 | Report skill and coverage separately for **wet** windows (MRMS rain summed over d0+1..d0+h ≥ 10 mm) and **dry** windows (< 2 mm) on the test split, per horizon (AC-3.10). Reported, not gated. MRMS labels rows only after prediction. | Label rain days with Open-Meteo rain (the input being judged); no split; gate on wet-day skill. | Student (accepted the AI's suggestion) | An overall skill near zero can hide a model that beats persistence when it matters (rain) and ties it on dry days, where "no change" is almost exact. Using observed MRMS rather than the forecast rain keeps the label independent of the model's input. It also feeds step 1 of D23. |
+| D25 | Report skill and coverage separately for **wet** windows (MRMS rain summed over d0+1..d0+h ≥ 10 mm) and **dry** windows (< 2 mm) on the test split, per horizon (AC-3.10). Reported, not gated. MRMS labels rows only after prediction. | Label rain days with Open-Meteo rain (the input being judged); no split; gate on wet-day skill. | Student (accepted the AI's suggestion) | An overall skill near zero can hide a model that beats persistence when it matters (rain) and ties it on dry days, where "no change" is almost exact. Using observed MRMS rather than the forecast rain keeps the label independent of the model's input. It also feeds step 1 of D23. The 10 mm / 2 mm cutoffs are judgment calls (the 10 mm matches the standard R10mm "heavy precipitation day" index; 2 mm absorbs MRMS noise), not tuned. **Flagged by the student to re-examine later** (see "Revisit later"). |
+| D26 | Apply an external review of this plan (Codex, 2026-09-23) as triaged by the AI. (1) **Accepted:** feature availability matrix plus a marker-value test (AC-2.10). (2) **Reduced:** hard/soft failure rules with Forecast as the freshness gate, and the pass exit equal to Forecast's exit (AC-6.10). (3) **Reduced:** atomic writes for every published file (AC-0.9), and the dashboard shows the metrics matching the forecast's `model_version` (AC-5.1). (4) **Accepted:** AC-3.9 is met when the check is correct; a real-data miss is a finding under D23, not an unmet criterion. (5) **Accepted:** `AS_OF_DATE` clock injection for fixtures, CI, and smoke tests (R14, AC-0.8, AC-1.7). (6) **Accepted in part:** response validation for units, lengths, date coverage, and grid cell, plus general pagination (AC-1.12), and exact dependency pins enforced by a test (AC-0.10). (7) **Accepted:** R8 and Out of scope now name D23's single alternative as the only exception. (8) **Accepted:** metric formulas and edge cases (AC-3.5). | Adopt every recommendation in full, including a run/snapshot ID with an atomic published manifest (for 3) and a freshness/status manifest gating downstream stages (for 2), and pinning a named Open-Meteo model; or ignore the review. | Student (accepted the AI's triage of the Codex review) | The findings were valid: fixture runs would have failed on the real date, the coverage criterion was ambiguous, and metrics could silently become `NaN`. **Declined parts:** the manifests add a coordination layer that the brief's "smallest design" rules out; atomic writes, Forecast's freshness checks, and version-matched metrics fix the same failures more simply. A named Open-Meteo model isn't pinned because the verified default is what train and serve share (D2); grid-cell recording (AC-1.12) detects a silent change. |
 | D17 | Offline fixture mode: `INGEST_SOURCE=fixtures` makes ingest read recorded responses from `tests/fixtures/` instead of HTTP. | No offline mode. | AI | Required by the course board ("offline fixture mode"). It lets the ingest smoke test and the container be demonstrated without network access. |
+
+### Revisit later
+
+Items the student deliberately parked. They are not blockers for the build. Re-examine after the Tester's review, once real metrics exist.
+
+| ID | Item | Why it was parked | What would trigger a change |
+|---|---|---|---|
+| RV1 | Wet/dry cutoffs in AC-3.10 (wet ≥ 10 mm, dry < 2 mm over d0+1..d0+h; D25). | Chosen by judgment, not data. On 2025 MRMS they give t+1: 39 wet / 284 dry / 41 light, t+2: 75 / 235 / 53, t+3: 105 / 193 / 64. The wet group mixes real events with rain on dry soil that barely moves the river. | Wet-group coverage or skill that is too noisy to read (fewer than about 40 wet rows), or a clear case that a different cutoff (e.g. 1 / 25 mm, or antecedent-wetness-aware labels) separates events better. The choice must be made without looking at test-period skill for each candidate cutoff. |
+| RV2 | Per-horizon rain inputs that would allow partial 1–2-row forecasts (D22). | Kept simple: truncated Open-Meteo responses are rare. | Truncated responses happen in practice (AC-4.7 refusals in the logs), or D23 selects it as the one allowed alternative. |
 
 ### Environment and commands
 
@@ -177,6 +187,7 @@ Locally, the same stages run one at a time with `make ingest`, `make features`, 
 | `USGS_API_KEY` | empty | Sent as a request header if set (the Builder verifies the header name in the api.waterdata.usgs.gov docs) |
 | `HTTP_TIMEOUT_S` / `HTTP_RETRIES` | `30` / `3` | HTTP behaviour |
 | `LOG_LEVEL` | `INFO` | Logging level |
+| `AS_OF_DATE` | empty | `YYYY-MM-DD`. If set, `paths.local_today()` returns it instead of the real date. Required with `INGEST_SOURCE=fixtures`; used by tests, CI, and fixture smoke tests. Never set in production (D26). |
 | `DASHBOARD_PORT` | `8501` | Port used by `make dashboard` |
 
 - **Make targets** (the public interface):
@@ -191,7 +202,7 @@ Locally, the same stages run one at a time with `make ingest`, `make features`, 
 | `make test` | All offline tests (`pytest -m "unit or regression or integration"`) with sockets disabled |
 | `make test-unit` / `make test-regression` / `make test-integration` | Tests for one marker |
 | `make ingest` / `make features` / `make train` / `make forecast` | Run one stage once |
-| `make coverage` | Prints per-horizon interval coverage from the newest metrics sidecar. Exits non-zero if outside the D19 tolerances (AC-3.9) |
+| `make coverage` | Prints per-horizon interval coverage from the newest metrics sidecar. Exits non-zero if outside the D19 tolerances (AC-3.9). This is a report: a real-data failure is a finding handled under D23, not a broken build. It is not part of `make test` or CI. |
 | `make pipeline` | `python -m streamforecast.scheduler --once`: ingest → features → train (if needed) → forecast, one pass (built in Stage 6) |
 | `make dashboard` | `streamlit run streamforecast/dashboard.py --server.port $(DASHBOARD_PORT)` |
 | `make docker-build` / `make up` / `make down` / `make logs` | Compose wrappers |
@@ -221,7 +232,9 @@ A runnable, lintable, testable empty package: config from env vars, path helpers
 - [ ] AC-0.3 `config.load()` returns every variable in the Environment table with its documented default, and an env var overrides each one (unit test).
 - [ ] AC-0.4 `paths` helpers return `DATA_DIR/raw/usgs`, `raw/weather_hist`, `raw/weather_fc`, `raw/weather_leads`, `raw/mrms`, `features`, `models`, `forecasts`, create them on demand, and produce UTC-timestamped file names that sort chronologically. `newest(dir, pattern)` returns the lexicographically last match or `None`.
 - [ ] AC-0.5 A unit test parses every stage module (`ingest`, `features`, `train`, `forecast`, `dashboard`) and the `scheduler` with `ast`, and fails if any of them imports a stage module (only `config`, `paths`, `logs` are shared). Modules that don't exist yet are skipped, so the test grows with the build.
-- [ ] AC-0.8 `paths.local_today()` returns `datetime.now(ZoneInfo(TIMEZONE)).date()`. With time frozen at 2026-09-23 23:30 America/New_York (03:30 UTC on 9/24), it returns 2026-09-23. No module calls `date.today()` (grep in the test).
+- [ ] AC-0.8 `paths.local_today()` returns `AS_OF_DATE` when that is set, otherwise `datetime.now(ZoneInfo(TIMEZONE)).date()`. With time frozen at 2026-09-23 23:30 America/New_York (03:30 UTC on 9/24) and `AS_OF_DATE` unset, it returns 2026-09-23. With `AS_OF_DATE=2026-09-23` it returns 2026-09-23 on any real date. No module calls `date.today()` (grep in the test). Calendar-date logic (today, yesterday, staleness, fetch dates) goes through `local_today()`. Real UTC timestamps for log lines, file names, and `created_at_utc` use `paths.utc_now()` and are not affected by `AS_OF_DATE`.
+- [ ] AC-0.9 **Atomic writes everywhere.** `paths.atomic_write(path, write_fn)` writes to `<path>.tmp` in the same directory and then calls `os.replace`. Every stage uses it for every published file (raw CSVs, features, rain check, MRMS verification file, checkpoint, sidecar, forecast). A glob for any published pattern never matches a `.tmp` file.
+- [ ] AC-0.10 Every line of `requirements.txt` and `requirements-dev.txt` is an exact `name==version` pin (a test parses them).
 - [ ] AC-0.6 `.github/workflows/ci.yml` runs on push and PR, sets up Python 3.12, and runs `make install`, `make lint`, `make test`.
 - [ ] AC-0.7 `make help` lists every target in the Environment section. `make config` prints the resolved config, and `DATA_DIR=/tmp/sf make config` shows the override.
 
@@ -257,7 +270,9 @@ A runnable, lintable, testable empty package: config from env vars, path helpers
 - unit `test_boundaries.py`: AST import rule → AC-0.5.
 - unit `test_network_blocked.py`: `requests.get("https://example.com")` raises the pytest-socket error → AC-0.2.
 - unit `test_marker_hook.py`: uses `pytester` to show an unmarked test causes a collection error → AC-0.2.
-- unit `test_local_today.py`: frozen clock at 23:30 ET (monkeypatched `datetime`), plus a grep for `date.today(` → AC-0.8.
+- unit `test_local_today.py`: frozen clock at 23:30 ET (monkeypatched `datetime`), the `AS_OF_DATE` override (and that `utc_now()` ignores it), and a grep for `date.today(` → AC-0.8.
+- unit `test_atomic_write.py`: an exception inside `write_fn` leaves no target file and no stray `.tmp`; a success leaves exactly the target → AC-0.9.
+- unit `test_requirements_pinned.py` → AC-0.10.
 - AC-0.1, AC-0.6, AC-0.7 are checked by commands (see the smoke test) and by CI.
 
 ### Manual Smoke Test
@@ -300,7 +315,7 @@ Fetch USGS daily mean discharge, Open-Meteo historical-forecast weather (past), 
 - [ ] AC-1.4 Weather CSV columns: `date, precip_mm, tmax_c, tmin_c, source, fetched_at_utc`, with `source ∈ {historical_forecast, forecast}`. The forecast file holds the 7 past days plus 3 forecast days. If the forecast endpoint returns fewer than 3 future days (today onward) or null values, the file is still written with what came back, and a WARNING `forecast returned N of 3 days` is logged (Forecast decides; AC-4.7). Every request uses `timezone=America/New_York`.
 - [ ] AC-1.5 All HTTP goes through one function with a timeout, `HTTP_RETRIES` attempts, and exponential backoff on 429/5xx/connection errors. A `Retry-After` header is honoured, capped at 60 s.
 - [ ] AC-1.6 On final failure (HTTP error, Open-Meteo `{"error": true}` body, or malformed JSON), ingest logs an ERROR naming the source and reason, writes no partial file for that source, still attempts the other sources, and exits non-zero. An empty USGS response (`features: []`) is logged as WARNING, writes no file, and is not a crash.
-- [ ] AC-1.7 `INGEST_SOURCE=fixtures make ingest` produces the same five file types from `tests/fixtures/` with no network access.
+- [ ] AC-1.7 `INGEST_SOURCE=fixtures AS_OF_DATE=2026-09-23 make ingest` produces the same five file types from `tests/fixtures/` with no network access. In fixture mode, `fetched_at_utc` is stamped as 12:00 America/New_York on `AS_OF_DATE`, so fixture-mode data look fresh to Forecast on that date regardless of the real date. Fixture mode without `AS_OF_DATE` exits 1 with a clear error.
 - [ ] AC-1.11 **MRMS (verification source, D24).**
   - Fetched from IEM `iemre/multiday` in one calendar-year chunk per request.
   - Incremental: a year that is already complete isn't re-requested, and the current year is re-requested from `max(existing date) − 7 days`.
@@ -310,7 +325,16 @@ Fetch USGS daily mean discharge, Open-Meteo historical-forecast weather (past), 
   - `MRMS_ENABLED=0` skips it entirely.
 - [ ] AC-1.10 **Timezone pinning.** Every Open-Meteo request (forecast, historical-forecast, previous-runs) includes `timezone=America/New_York`, taken from `TIMEZONE`. Ingest checks that the response's `timezone` field equals the requested value; on a mismatch it logs an ERROR `timezone mismatch: requested America/New_York, got <tz>` and writes no file for that source. USGS `time` and Open-Meteo `daily.time` are written verbatim as `YYYY-MM-DD` strings: never parsed as timestamps, never localized, never converted to UTC.
 - [ ] AC-1.9 Previous-runs CSV `raw/weather_leads/weather_leads_<ts>.csv` has columns `date, lead_days, precip_mm, n_hours, fetched_at_utc`, with `lead_days ∈ {1, 2}`, from hourly `precipitation_previous_day1` and `precipitation_previous_day2` requested with `timezone=America/New_York`. `precip_mm` is the sum of the hourly values on that local date. It is written only when every hour of that date is present and non-null (`n_hours` equals 23, 24, or 25 on DST-change days, as appropriate); otherwise it is NaN, and a WARNING counts the incomplete days.
-- [ ] AC-1.8 Files are written atomically (write to `.tmp`, then rename), so a crash never leaves a half-written CSV that matches the pattern.
+- [ ] AC-1.8 Files are written atomically with `paths.atomic_write` (AC-0.9), so a crash never leaves a half-written CSV that matches the pattern.
+- [ ] AC-1.12 **Response validation (D26).** Before writing, ingest checks each response; a failure is handled as a source failure (AC-1.6).
+  - **Units:**
+    - Open-Meteo `daily_units` must be `mm` for precipitation and `°C` for temperatures.
+    - Previous-runs `hourly_units` must be `mm`.
+    - Every USGS row must have `unit_of_measure == "ft^3/s"`, `statistic_id == "00003"`, and `monitoring_location_id == "USGS-" + USGS_SITE`. Non-matching USGS rows are dropped and counted, with an ERROR if any are dropped.
+  - **Shape:** every data array has the same length as `time`.
+  - **Date coverage:** returned dates are contiguous and cover the requested range. Missing dates are listed in a WARNING and the file is still written.
+  - **Grid cell:** weather CSVs also record `grid_lat`, `grid_lon`, `elevation` from the response. Features logs a WARNING if the grid cell differs between files.
+  - **Pagination:** USGS follows every `next` link until none remains (not only when `numberReturned == 10000`).
 
 ### Proposed changes
 - `streamforecast/ingest.py`: `fetch_usgs`, `fetch_weather_hist`, `fetch_weather_leads`, `fetch_weather_forecast`, `http_get_json` (retry), `main()` (`python -m streamforecast.ingest`).
@@ -335,7 +359,7 @@ Fetch USGS daily mean discharge, Open-Meteo historical-forecast weather (past), 
 - Must never use the Open-Meteo archive endpoint (RK9).
 
 ### Risks for this stage
-RK1, RK7, RK11, RK12, RK13. Also a first-backfill payload of about 5 MB from USGS: one request with `limit=10000` is sufficient (verified). If `numberReturned == 10000`, follow the `next` link.
+RK1, RK7, RK11, RK12, RK13. Also a first-backfill payload of about 5 MB from USGS: one request with `limit=10000` is sufficient (verified). Pagination is handled generally (AC-1.12).
 
 ### Automated tests
 - unit `test_parse_usgs_sorts_and_types` (unordered fixture → sorted, float) → AC-1.3.
@@ -355,6 +379,9 @@ RK1, RK7, RK11, RK12, RK13. Also a first-backfill payload of about 5 MB from USG
 - integration `test_empty_usgs_warns` → AC-1.6.
 - integration `test_fixture_mode` (no `responses` registration; sockets disabled) → AC-1.7.
 - unit `test_atomic_write_no_partial` (simulated exception mid-write leaves no matching file) → AC-1.8.
+- unit `test_validate_units_and_lengths` (wrong `daily_units`, mismatched array length, wrong `unit_of_measure`/`statistic_id` rows) and `test_date_coverage_gap_warns` → AC-1.12.
+- integration `test_usgs_follows_next_links` (two-page fixture made by splitting `usgs_daily_recent.json` and adding a `next` link; all rows collected once) → AC-1.12.
+- integration `test_fixture_mode_requires_as_of_date` → AC-1.7.
 
 ### Manual Smoke Test
 #### What we're proving
@@ -371,7 +398,7 @@ grep '^2026-09-18' data/raw/weather_leads/*.csv
 cat data/raw/weather_fc/*.csv
 make ingest
 ls -l data/raw/usgs data/raw/weather_hist data/raw/weather_leads data/raw/weather_fc
-INGEST_SOURCE=fixtures DATA_DIR=/tmp/sf-fixture make ingest
+INGEST_SOURCE=fixtures AS_OF_DATE=2026-09-23 DATA_DIR=/tmp/sf-fixture make ingest
 ```
 #### Watch for
 - First run: log lines like `usgs: fetched ~3,190 rows 2018-01-01..<yesterday>` and `weather_hist: fetched ~3,190 rows`, with no null-weather WARNING. The forecast file has 10 rows whose last 3 dates are today, tomorrow, and the day after.
@@ -407,7 +434,8 @@ Merge the raw files into one daily, validated table on America/New_York dates, a
 
   A second fixture holds the same historical-forecast request made with `timezone=GMT` (the heavy rain shifts to 07-07, a day after the rise). Ingest rejects it under AC-1.10. When the rejection is bypassed in the test, the lag-0 assertion fails. That shows the test really detects misalignment. Features join all sources on the date string only.
 - [ ] AC-2.6 No leakage: for any issue date d0, changing any flow value after d0 leaves every feature column on row d0 unchanged (targets `y_1..y_3` excluded, since they are future flow by definition). Changing any historical-forecast or forecast weather value after d0 changes only `precip_f1..f3` (the documented exception in R6 and RK3), and changing weather after d0+3 changes nothing. Tested as a property test on perturbed copies.
-- [ ] AC-2.7 Output `data/features/features_<ts>.csv` with columns: `date` (d0), `flow_cfs`, `approval_status`, `qualifier`, `flow_filled`, `logq_0`, `logq_1`, `logq_2`, `dlogq_1`, `precip_0`, `api_7`, `api_30`, `precip_f1`, `precip_f2`, `precip_f3`, `weather_lead_matched`, `fc_fetched_date`, `tmax_0`, `tmin_0`, `doy_sin`, `doy_cos`, `y_1`, `y_2`, `y_3`. It includes the latest d0 row (targets NaN). `fc_fetched_date` is the local date on which the forecast file that supplied that row's `precip_f*` was fetched; it is set only on the latest row. At most the 5 newest features files are kept.
+- [ ] AC-2.7 Output `data/features/features_<ts>.csv` with columns: `date` (d0), `flow_cfs`, `approval_status`, `qualifier`, `flow_filled`, `logq_0`, `logq_1`, `logq_2`, `dlogq_1`, `precip_0`, `api_7`, `api_30`, `precip_f1`, `precip_f2`, `precip_f3`, `weather_lead_matched`, `fc_fetched_date`, `tmax_0`, `tmin_0`, `doy_sin`, `doy_cos`, `y_1`, `y_2`, `y_3`. It includes the latest d0 row (targets NaN). `fc_fetched_date` is the local date on which the forecast file that supplied that row's `precip_f*` was fetched; it is set only on the latest row. At most the 5 newest features files are kept. All features outputs are written with `paths.atomic_write` (AC-0.9).
+- [ ] AC-2.10 **Every feature follows the availability matrix** below (D26). Test: build features from fixtures where each source carries a distinct marker value (historical-forecast = 1.0 mm, previous-runs lead 1 = 2.0, lead 2 = 3.0, `weather_fc` = 4.0) and assert, for one train row, one calibration row, one test row, and the live row, that every weather feature equals the marker of the source the matrix names, and that no feature reads a date after its "Latest data" column.
 - [ ] AC-2.9 **Rain check against MRMS (verification only, D24).** When raw MRMS files exist, Features also writes `data/features/rain_check_<ts>.json` for dates from `CALIBRATION_START` onward.
   - **Per Open-Meteo rain series** (`lead0` = historical-forecast, `lead1`, `lead2`), versus MRMS: `n`, `bias_mm`, `mae_mm`, `hits` (MRMS ≥ 10 mm and Open-Meteo ≥ 10 mm), `misses` (MRMS ≥ 10 mm, Open-Meteo < 2 mm), and `false_alarms` (Open-Meteo ≥ 10 mm, MRMS < 2 mm).
   - **The 10 dates with the largest absolute disagreement**, with both values.
@@ -418,6 +446,19 @@ Merge the raw files into one daily, validated table on America/New_York dates, a
 - [ ] AC-2.8 Lead-matched rain (D20). For rows with `CALIBRATION_START ≤ d0 < latest d0`: `precip_f1` = historical-forecast precipitation on d0+1 (lead 0), `precip_f2` = previous-runs `lead_days=1` on d0+2, and `precip_f3` = previous-runs `lead_days=2` on d0+3, with `weather_lead_matched = True`. If a lead value is missing, it stays NaN; it is **never** back-filled from historical-forecast. Rows before `CALIBRATION_START` use historical-forecast for all three, with `weather_lead_matched = False`. The latest row takes `precip_f1..f3` from the newest `weather_fc` file (the live forecast; `weather_lead_matched = True`). Verified on the fixture: row d0 = 2026-09-16 has `precip_f2` equal to the 2026-09-18 lead-1 value (0.7 mm), not 51.5 mm.
 
 Feature definitions (all relative to issue date d0): `logq_k = log1p(flow[d0−k])`; `dlogq_1 = logq_0 − logq_1`; `precip_0` = precipitation on d0; `api_7`, `api_30` = precipitation summed over d0−6..d0 and d0−29..d0; `precip_fh` = precipitation on d0+h (source per AC-2.8); `tmax_0`, `tmin_0` on d0; `doy_sin/cos` from the day of year of d0; `y_h = log1p(flow[d0+h]) − logq_0`.
+
+**Feature availability matrix (D26).** Issue time is the morning of d0+1 (America/New_York). "Latest data" is the last valid date a feature may use.
+
+| Feature | Train rows (d0 < 2024-02-01) | Calibration and test rows (d0 ≥ 2024-02-01) | Live row (serve) | Latest data | Available at issue time? |
+|---|---|---|---|---|---|
+| `logq_0..2`, `dlogq_1` | USGS daily mean | USGS daily mean | USGS daily mean (may be provisional) | d0 | Yes: d0's value is posted by d0+1 (RK8 covers late posting) |
+| `precip_0`, `tmax_0`, `tmin_0` | historical-forecast, d0 | historical-forecast, d0 | newest `weather_fc` `past_days` value for d0 | d0 | Yes: verified identical to historical-forecast for past days (2026-09-15..22) |
+| `api_7`, `api_30` | historical-forecast, d0−6..d0 / d0−29..d0 | same | `weather_fc` `past_days` for d0−6..d0, historical-forecast for older days | d0 | Yes |
+| `precip_f1` | historical-forecast, d0+1 (≈ lead 0) | historical-forecast, d0+1 (lead 0) | `weather_fc` day 1 (today, lead 0) | forecast issued on d0+1 | Yes |
+| `precip_f2` | historical-forecast, d0+2 (≈ lead 0: **documented exception**, R6/RK3) | previous-runs `lead_days=1`, d0+2 | `weather_fc` day 2 (lead 1) | forecast issued on d0+1 | Train: no (exception); others: yes |
+| `precip_f3` | historical-forecast, d0+3 (**documented exception**) | previous-runs `lead_days=2`, d0+3 | `weather_fc` day 3 (lead 2) | forecast issued on d0+1 | Train: no (exception); others: yes |
+| `doy_sin`, `doy_cos` | calendar | calendar | calendar | d0 | Yes |
+| MRMS (any) | never a feature | never a feature | never a feature | n/a | n/a (verification only, D24) |
 
 ### Proposed changes
 - `streamforecast/features.py`: `load_raw_usgs`, `load_raw_weather`, `validate_flow`, `build_features`, `main()`.
@@ -437,6 +478,7 @@ RK5 (never clip), RK7 (revisions), RK9 (leakage via fill), RK10 (log1p), RK13 (d
 - regression `test_chantal_peak_survives` (fixture → 8,180.0 in output) → AC-2.3.
 - unit `test_gap_1_day_filled_gap_10_days_not` → AC-2.4.
 - regression `test_chantal_rain_and_flow_same_local_date` (ET fixtures: exact values and lag 0) → AC-2.5.
+- unit `test_feature_availability_matrix` (marker-value test) → AC-2.10.
 - regression `test_mrms_peak_day_matches_flow_jump` (Chantal MRMS fixture) → AC-2.5.
 - unit `test_rain_check_metrics_and_false_alarm` (2026-09-18 flagged; counts and bias against hand-computed values) → AC-2.9.
 - unit `test_no_mrms_column_in_features` and `test_rain_check_skipped_without_mrms` (features byte-identical with and without MRMS files) → AC-2.9.
@@ -484,8 +526,21 @@ Fit one `HistGradientBoostingRegressor` per horizon on the train split, compute 
 - [ ] AC-3.1 Splits come from `TRAIN_END`, `CALIBRATION_START`, and `CALIBRATION_END`, by date: train covers ..`TRAIN_END`, calibration covers `CALIBRATION_START`..`CALIBRATION_END`, and test covers after `CALIBRATION_END`. Rows between `TRAIN_END` and `CALIBRATION_START` are unused. A row belongs to a split only if both d0 and d0+h fall inside it. Every calibration and test row has `weather_lead_matched = True`; training aborts with an error if not. Rows with a NaN feature are dropped from calibration and test and counted in the log (HGB would accept them, but they would not be lead-matched). The three splits do not overlap and are strictly ordered in time, and no shuffling occurs anywhere (test asserts max(train date) < min(calibration date) < min(test date) per horizon).
 - [ ] AC-3.2 Three models (h = 1, 2, 3) with `random_state=0` and default hyperparameters, fit only on train rows, target `y_h`, on the feature columns listed in AC-2.7 (excluding `date`, `flow_cfs`, `approval_status`, `qualifier`, `flow_filled`, `weather_lead_matched`, `fc_fetched_date`, and the targets).
 - [ ] AC-3.3 The residual quantiles at 0.025, 0.10, 0.50, 0.90, 0.975 per horizon come from calibration rows only, are stored in the checkpoint, and are non-decreasing.
-- [ ] AC-3.4 Checkpoint `data/models/model_<ts>.joblib` contains `models`, `residual_quantiles`, `feature_columns`, `sklearn_version`, `split_dates`, and `trained_at_utc`. Sidecar `data/models/metrics_<ts>.json` has the same `<ts>`. The sidecar is written last; a checkpoint without a sidecar counts as unpublished.
+- [ ] AC-3.4 Checkpoint `data/models/model_<ts>.joblib` contains `models`, `residual_quantiles`, `feature_columns`, `sklearn_version`, `split_dates`, and `trained_at_utc`. Sidecar `data/models/metrics_<ts>.json` has the same `<ts>`, and both store `model_version = <ts>`. Both are written with `paths.atomic_write` (AC-0.9), the checkpoint first and the sidecar last; a checkpoint without a sidecar counts as unpublished. The sidecar is valid JSON with no `NaN`/`Infinity` (`allow_nan=False`); missing values are `null`.
 - [ ] AC-3.5 The sidecar reports, per horizon on the test split: `n`, model `mae_cfs`, `rmse_cfs`, `nse`; persistence `mae_cfs`, `nse`; `skill_mae = 1 − mae_model/mae_persistence`; `coverage_80`, `coverage_95`; and `coverage_80_high`, `coverage_95_high`, `n_high` for days whose observed flow at d0+h exceeds the training 90th percentile of flow. Calibration-split coverage is reported too.
+  **Metric definitions (D26), for every group (overall, high-flow, wet, dry):**
+  - **Common rows:** model and persistence are scored on exactly the same rows: those with an observed target and complete features (`n` counts them).
+  - **Formulas** (o = observed cfs at d0+h, p = prediction in cfs):
+    - `mae = mean|o−p|`
+    - `rmse = sqrt(mean (o−p)²)`
+    - `nse = 1 − Σ(o−p)² / Σ(o−ō)²`
+    - `skill_mae = 1 − mae_model / mae_persistence`
+    - `coverage_x` = share of rows with `lo_x ≤ o ≤ hi_x`
+  - **Edge cases:**
+    - `nse` is `null` when `Σ(o−ō)² = 0`.
+    - `skill_mae` is `null` when `mae_persistence = 0`.
+    - A group with `n < 20` reports every metric as `null` with `"status": "insufficient"`, otherwise `"status": "ok"`; an empty group has `n = 0`.
+  - **Never silent:** no metric is ever computed from mismatched rows or reported as `NaN`.
 - [ ] AC-3.6 On a synthetic stationary series (fixed seed, generated in the test), calibration and test coverage of the 80% band are within 0.80 ± 0.05 and of the 95% band within 0.95 ± 0.03, and the model beats persistence (`skill_mae > 0`) at h = 1.
 - [ ] AC-3.7 Deterministic: two runs of `make train` on the same features file produce identical predictions and quantiles.
 - [ ] AC-3.8 Training logs a WARNING (not an error) for any horizon where `skill_mae ≤ 0` or the AC-3.9 coverage check fails. Training still publishes. The Tester records either condition on real data as a finding.
@@ -498,11 +553,11 @@ Fit one `HistGradientBoostingRegressor` per horizon on the train split, compute 
   - **Not gated:** the split is reported, not gated.
   - **MRMS stays out of the model:** it is used only to label rows **after** prediction, and the checkpoint's `feature_columns` never include it.
   - **If MRMS is unavailable:** `by_rain` is `null` and training logs a WARNING (training still succeeds).
-- [ ] AC-3.9 **Test-period interval coverage.** `make coverage` reads the newest metrics sidecar, prints a per-horizon table (`h`, `n`, `coverage_80`, `coverage_95`, `n_high`, `coverage_80_high`, `coverage_95_high`, calibration `coverage_80`/`coverage_95`, and, printed but not gated, `skill_mae` and `coverage_80` for the wet and dry groups from AC-3.10), and exits 0 only if, for **every** horizon on the **test split**:
+- [ ] AC-3.9 **Test-period interval coverage check.** This criterion is met when the **check works correctly**, proven on hand-written sidecars. The **real-data result** is reported, not required to pass: an out-of-tolerance result on real data is a **finding** handled under D23 and in the Tester's review, not an unmet criterion (D26). The deterministic, strict gates are AC-3.6 (synthetic coverage and skill) and the calibration wiring check below. `make coverage` reads the newest metrics sidecar, prints a per-horizon table (`h`, `n`, `coverage_80`, `coverage_95`, `n_high`, `coverage_80_high`, `coverage_95_high`, calibration `coverage_80`/`coverage_95`, and, printed but not gated, `skill_mae` and `coverage_80` for the wet and dry groups from AC-3.10), and exits 0 only if, for **every** horizon on the **test split**:
   - `coverage_80` ∈ [0.72, 0.88] and `coverage_95` ∈ [0.90, 0.99] (tolerances from D19), and
   - calibration-split `coverage_80` and `coverage_95` are within ±0.02 of nominal. This is a wiring check: the quantiles are computed from the calibration period, so anything else means the bands are applied incorrectly.
 
-  Coverage means the fraction of rows where `lo ≤ observed Q[d0+h] ≤ hi`, inclusive, computed in cfs using the **same band function as Forecast**. High-flow coverage is printed but not gated, because `n_high` is small and clustered in a few events (RK6). A failure on real data is a finding for the Tester and student to triage. It must **not** be fixed by widening the tolerances or recomputing quantiles on the test split.
+  Coverage means the fraction of rows where `lo ≤ observed Q[d0+h] ≤ hi`, inclusive, computed in cfs using the **same band function as Forecast**. High-flow coverage is printed but not gated, because `n_high` is small and clustered in a few events (RK6). The non-zero exit is kept so a failure is visible, and `make coverage` is not part of `make test` or CI (it needs real data). **Required response to a real-data failure:** (1) if the calibration wiring check fails, it's a bug; fix it. (2) If only the test tolerances fail, the Tester records a finding with the table, and the student triages it under D23: diagnose first, then accept and document it or try the one allowed alternative. It must **not** be fixed by widening the tolerances or recomputing quantiles on the test split.
 
 ### Proposed changes
 - `streamforecast/train.py`: `split_by_date`, `fit_horizon`, `residual_quantiles`, `bands`, `evaluate`, `publish`, `main()`, plus `--report` (reads the newest sidecar, prints the coverage table, applies the AC-3.9 thresholds, and sets the exit code).
@@ -528,6 +583,7 @@ RK3, RK5, RK6, RK16. There is also a risk of subtle leakage at split edges; miti
 - unit `test_coverage_report_thresholds` (hand-written sidecars: one inside every tolerance → exit 0; test `coverage_80 = 0.70` → exit 1; calibration `coverage_80 = 0.75` → exit 1; boundaries 0.72 and 0.88 pass) → AC-3.9.
 - unit `test_rain_split_labels_and_metrics` (a hand-built MRMS series: window sums 0, 5, 12 mm → dry, light, wet; the h=3 window is d0+1..d0+3; group metrics match hand-computed values) → AC-3.10.
 - unit `test_rain_split_null_without_mrms` and `test_checkpoint_features_exclude_mrms` → AC-3.10.
+- unit `test_metric_edge_cases` (constant observations → `nse` null; zero persistence error → `skill_mae` null; a 19-row group → `insufficient`; an empty wet group → `n = 0`; the model and persistence row sets are identical; the sidecar parses with `allow_nan=False`) → AC-3.5, AC-3.10.
 - unit `test_coverage_inclusive_and_in_cfs` (an observation exactly on a bound counts as covered; the computation goes through `bands()`) → AC-3.9.
 
 ### Manual Smoke Test
@@ -561,7 +617,7 @@ Nothing is left running.
 Load the newest published checkpoint and the newest features row, and write a 3-day forecast with median, 80%, and 95% bounds next to the persistence baseline.
 
 ### Acceptance criteria
-- [ ] AC-4.1 The output `data/forecasts/forecast_<d0>_<ts>.csv` has exactly 3 rows (h = 1, 2, 3) and columns: `issue_date` (d0), `valid_date`, `horizon`, `median_cfs`, `lo80_cfs`, `hi80_cfs`, `lo95_cfs`, `hi95_cfs`, `persistence_cfs`, `latest_obs_cfs`, `latest_obs_provisional`, `latest_obs_estimated`, `stale_days`, `fc_fetched_date`, `model_version`, `created_at_utc`.
+- [ ] AC-4.1 The output `data/forecasts/forecast_<d0>_<ts>.csv` has exactly 3 rows (h = 1, 2, 3) and columns: `issue_date` (d0), `valid_date`, `horizon`, `median_cfs`, `lo80_cfs`, `hi80_cfs`, `lo95_cfs`, `hi95_cfs`, `persistence_cfs`, `latest_obs_cfs`, `latest_obs_provisional`, `latest_obs_estimated`, `stale_days`, `fc_fetched_date`, `model_version`, `created_at_utc`. `model_version` is the checkpoint's `<ts>` (AC-3.4). The file is written with `paths.atomic_write` (AC-0.9).
 - [ ] AC-4.2 Bounds are computed as in D9: `q_p = logq_0 + ŷ_h + r_p`, `cfs = max(0, expm1(q_p))`, and `median_cfs` uses `r_0.50`.
 - [ ] AC-4.3 On every row, `0 ≤ lo95 ≤ lo80 ≤ median ≤ hi80 ≤ hi95`.
 - [ ] AC-4.4 No published checkpoint (no `model_*.joblib` with a matching `metrics_*.json`): log `no checkpoint yet; skipping forecast` at WARNING, write nothing, exit 0.
@@ -637,7 +693,10 @@ Nothing is left running.
 A Streamlit page that shows the last 60 days of observed flow plus the 3-day fan chart, with skill against persistence and interval coverage, reading only files under `DATA_DIR`.
 
 ### Acceptance criteria
-- [ ] AC-5.1 The page reads only the newest `forecasts/forecast_*.csv`, the newest `features/features_*.csv`, and the newest `models/metrics_*.json`. The module imports no stage module and makes no network calls (the boundary test from AC-0.5 covers the imports).
+- [ ] AC-5.1 The page reads only these files; the module imports no stage module and makes no network calls (the boundary test from AC-0.5 covers the imports).
+  - **Forecast:** the newest `forecasts/forecast_*.csv`.
+  - **Observed history:** the newest `features/features_*.csv`.
+  - **Metrics (D26):** the metrics sidecar whose `model_version` **matches the displayed forecast's `model_version`** (`models/metrics_<model_version>.json`), not simply the newest one, so the KPIs always describe the model that made the forecast shown. If that sidecar is missing, the KPIs show "metrics unavailable for model <version>", and the page still renders.
 - [ ] AC-5.2 The fan chart shows observed `flow_cfs` for the 60 days ending at d0, the forecast median, a shaded 80% band, a lighter 95% band, and the persistence line (dashed). The y-axis is labelled `cfs` and the x-axis shows dates.
 - [ ] AC-5.3 The chart title states a finding computed from the data, e.g. "Flow expected to rise to about 120 cfs by Friday" (rise/fall/hold decided by comparing the h = 3 median with `latest_obs_cfs`; "hold" when within ±10%).
 - [ ] AC-5.4 At most 3 KPIs: tomorrow's median (t+1), t+1 skill vs persistence (`skill_mae`, test split), and t+1 80% coverage on the test split.
@@ -664,6 +723,7 @@ Streamlit `AppTest` and pytest-socket (see Stage 0 risk). The chart can be misre
 ### Automated tests
 - unit `test_headline_rise_fall_hold` → AC-5.3.
 - integration `test_app_renders_with_data` (chart present, exactly 3 metrics) → AC-5.2, AC-5.4.
+- integration `test_app_metrics_match_forecast_model` (two sidecars exist; the forecast references the older one; the KPIs show the older one's numbers; with the matching sidecar deleted, the KPIs show "unavailable") → AC-5.1.
 - integration `test_app_warnings` (cases: outdated forecast, `stale_days = 1`, provisional latest value, a past `valid_date`; clock frozen) → AC-5.5.
 - integration `test_app_empty_dir` → AC-5.6.
 - unit `test_boundaries` (from Stage 0) → AC-5.1.
@@ -711,7 +771,15 @@ One image and two Compose services (a pipeline scheduler and the dashboard) shar
 - [ ] AC-6.6 `streamforecast/scheduler.py` runs the stages as subprocesses in order, continues to the next stage if one fails, runs train only when needed (D5), sleeps `RUN_INTERVAL_HOURS`, and exits within 10 s on SIGTERM (`docker compose down` does not hit the kill timeout).
 - [ ] AC-6.7 Data persist: after `docker compose down` and `docker compose up -d`, the previous forecast file is still in the volume and the dashboard shows it before the next run finishes.
 - [ ] AC-6.8 Tests run inside the container: `docker compose run --rm pipeline make test` exits 0.
-- [ ] AC-6.9 `make pipeline` runs `python -m streamforecast.scheduler --once`: one pass of ingest → features → train (only if no checkpoint exists or the newest is older than `RETRAIN_DAYS`) → forecast, then exit. Exit status is 0 only if every stage that ran succeeded.
+- [ ] AC-6.9 `make pipeline` runs `python -m streamforecast.scheduler --once`: one pass of ingest → features → train (only if no checkpoint exists or the newest is older than `RETRAIN_DAYS`) → forecast, then exit.
+- [ ] AC-6.10 **Hard vs soft failures (D26).**
+  - **Soft (the run continues):**
+    - an ingest source failure: ingest exits 1, but the scheduler still runs Features and Forecast on the existing files, and an MRMS failure never changes ingest's exit (AC-1.11);
+    - a Features failure: Forecast then sees an old features file;
+    - a Train failure: Forecast uses the previous published checkpoint.
+  - **The gate is Forecast:** its freshness checks (AC-4.5, 4.7, 4.9, 4.10) decide whether stale or mixed inputs are acceptable. Forecast never publishes from USGS data more than `MAX_STALE_DAYS` old, or from forecast weather not fetched today.
+  - **No stage is skipped** because an earlier one failed; there is no separate status file.
+  - **Exit status:** after each pass, the scheduler logs one summary line, e.g. `pass summary: ingest=1 features=0 train=skipped forecast=0`. `make pipeline` (`--once`) exits with **Forecast's** exit code (0 = forecast written or no checkpoint yet; 1 = refused or failed). A failed ingest source therefore shows in the summary and logs but fails the pass only if it makes Forecast refuse.
 
 ### Proposed changes
 - `Dockerfile`: slim image, non-root `app` user (uid 1000), `/data` created and chowned.
@@ -735,6 +803,7 @@ RK14 (volume ownership). The first container start performs the full backfill an
 - unit `test_scheduler_continues_after_failure` → AC-6.6.
 - unit `test_scheduler_sigterm_stops_quickly` → AC-6.6.
 - unit `test_scheduler_once_exit_code` → AC-6.9.
+- unit `test_scheduler_soft_failures` (ingest exits 1 and Forecast still runs; Features fails and Forecast still runs; the pass exit equals Forecast's exit; the summary line lists every stage) → AC-6.10.
 - AC-6.1 through AC-6.5, AC-6.7, and AC-6.8 are verified by the smoke test commands below (and by the optional CI build job for AC-6.1).
 
 ### Manual Smoke Test
