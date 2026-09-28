@@ -1,0 +1,70 @@
+# Two services from one image, sharing the named volume sfdata at /data (D15).
+# Every setting comes from the environment with the documented default (R11).
+
+x-settings: &settings
+  DATA_DIR: /data
+  USGS_SITE: ${USGS_SITE:-02085000}
+  LATITUDE: ${LATITUDE:-36.0711}
+  LONGITUDE: ${LONGITUDE:--79.0956}
+  TIMEZONE: ${TIMEZONE:-America/New_York}
+  HISTORY_START: ${HISTORY_START:-2018-01-01}
+  TRAIN_END: ${TRAIN_END:-2023-12-31}
+  CALIBRATION_START: ${CALIBRATION_START:-2024-02-01}
+  CALIBRATION_END: ${CALIBRATION_END:-2024-12-31}
+  LEADS_START: ${LEADS_START:-2024-01-25}
+  USGS_LOOKBACK_DAYS: ${USGS_LOOKBACK_DAYS:-30}
+  MAX_FFILL_DAYS: ${MAX_FFILL_DAYS:-2}
+  MAX_STALE_DAYS: ${MAX_STALE_DAYS:-2}
+  RUN_INTERVAL_HOURS: ${RUN_INTERVAL_HOURS:-24}
+  RETRAIN_DAYS: ${RETRAIN_DAYS:-7}
+  INGEST_SOURCE: ${INGEST_SOURCE:-live}
+  MRMS_ENABLED: ${MRMS_ENABLED:-1}
+  USGS_API_KEY: ${USGS_API_KEY:-}
+  HTTP_TIMEOUT_S: ${HTTP_TIMEOUT_S:-30}
+  HTTP_RETRIES: ${HTTP_RETRIES:-3}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  AS_OF_DATE: ${AS_OF_DATE:-}
+  DASHBOARD_PORT: ${DASHBOARD_PORT:-8501}
+
+services:
+  pipeline:
+    build: .
+    image: streamforecast:latest
+    command: ["python", "-m", "streamforecast.scheduler"]
+    environment: *settings
+    volumes:
+      - sfdata:/data
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  dashboard:
+    build: .
+    image: streamforecast:latest
+    command:
+      - streamlit
+      - run
+      - streamforecast/dashboard.py
+      - --server.address
+      - 0.0.0.0
+      - --server.port
+      - "8501"
+    environment: *settings
+    ports:
+      - "${DASHBOARD_PORT:-8501}:8501"
+    volumes:
+      - sfdata:/data
+    restart: unless-stopped
+    healthcheck:
+      # No curl in the slim image: use Python's urllib.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5).status == 200 else 1)"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  sfdata:

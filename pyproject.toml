@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streamforecast"
+version = "0.1.0"
+description = "Daily 3-day streamflow forecast for the Eno River at Hillsborough, NC (USGS 02085000)"
+requires-python = ">=3.12"
+
+[tool.setuptools.packages.find]
+include = ["streamforecast*"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --disable-socket -p pytester"
+markers = [
+    "unit: fast, isolated tests of one function or module",
+    "regression: fixed real-data or synthetic cases that must keep their results",
+    "integration: several pieces together (a stage main(), files on disk, mocked HTTP)",
+]

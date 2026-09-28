@@ -1,0 +1,14 @@
+data/
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+.git/
+*.joblib
+docs/transcripts/
+*.egg-info/
+build/
+*.tmp
+.env
+.claude/

@@ -245,30 +245,115 @@ Scope: only this stage's acceptance criteria. Stop when they are met, lint and t
 ```
 
 Stage-specific "Before you move on" checks (shown with each stage):
-- Stage 0 — Skeleton: `make test` runs with markers; `make lint` runs black --check and flake8; CI workflow file exists and runs the same make targets; config values come from env vars with defaults.
-- Stage 1 — Ingest: tests use fixtures only (unplug your wifi and run `make test`); a second run fetches only new days; a rate-limit or empty response is logged, not a crash.
-- Stage 2 — Features: a flood peak from the record survives into data/features/; negative or sentinel values are dropped; rain and flow line up on the same local date.
-- Stage 3 — Train: splits are by date, not shuffled; the metrics sidecar reports skill against persistence for each horizon; residual quantiles are stored with the checkpoint.
-- Stage 4 — Forecast: exactly 3 rows; lo95 ≤ lo80 ≤ median ≤ hi80 ≤ hi95 on every row; bounds are never negative cfs; it waits cleanly when there's no checkpoint.
-- Stage 5 — Dashboard: the chart title states a finding ("Flow expected to rise to about X cfs by Friday"), not a variable name; no more than 3 KPIs; it reads files only.
-- Stage 6 — Containers: `docker compose up` brings both services up; the dashboard healthcheck turns healthy; data persists after `docker compose down` and `up`; runs as a non-root user; tests run inside the container. If the agent's environment has no Docker, it must say "not verified" rather than guess; you verify at Gate 2. A CI job that builds the image is a cheap extra.
+
+**Stage 0 — Skeleton**
+- `make lint` runs `black --check` AND `flake8`; both must pass. (AC-0.1)
+- `make test` uses `--strict-markers` and `--disable-socket`; an unmarked test is a collection error, not a skip. (AC-0.2)
+- `paths.local_today()` returns `AS_OF_DATE` if set, else `datetime.now(ZoneInfo(TIMEZONE)).date()`. Grep the whole codebase: zero occurrences of `date.today()` or UTC datetime for "today". (AC-0.8)
+- `paths.atomic_write()` uses `.tmp` + `os.replace`. Grep: no `.tmp` files match any published file pattern. (AC-0.9)
+- Every line in `requirements.txt` and `requirements-dev.txt` is an exact `name==version` pin — no `>=`, `~=`, or bare names. (AC-0.10)
+- CI workflow file exists and runs `make lint` and `make test` in that order. (AC-0.6)
+
+**Stage 1 — Ingest**
+- `INGEST_SOURCE=fixtures AS_OF_DATE=2026-09-23 make ingest` produces all 5 raw file types with zero network calls; fixture mode without `AS_OF_DATE` exits 1. (AC-1.7)
+- A second run (real or fixture) fetches only days after the last file's date — not the full backfill again. (AC-1.2)
+- Previous-runs hourly precipitation values are summed per America/New_York calendar date; an incomplete day (no midnight) produces NaN for that date with a WARNING, not a crash. (AC-1.9)
+- Every Open-Meteo request includes `timezone=America/New_York`; if the response `timezone` field differs, ingest exits with ERROR and writes no file. (AC-1.10)
+- MRMS fetch failure logs a WARNING but never raises the ingest exit code above 0. (AC-1.11)
+- USGS fetch follows `next` pagination links; response validation checks units, length, and date coverage. (AC-1.12)
+
+**Stage 2 — Features**
+- The Chantal flood peak (8,180 cfs on 2025-07-07) appears in `data/features/` with exactly that value — no clipping, no log transform stored in place of cfs. (AC-2.3)
+- Rain aligns with flow on the same local date: 2025-07-06 shows ~54.7 mm and ~1990 cfs. If rain is one day late, timezone pinning is broken. (AC-2.5)
+- Lead-matched rain: every row from 2024-02-01 onward has `weather_lead_matched = True` and uses previous-runs API values for `precip_f2`/`precip_f3`; the switch date is exact. (AC-2.8)
+- `data/features/rain_check.json` exists with bias, MAE, hits, misses, and false-alarms vs MRMS; confirm 2026-09-18 appears as a lead-0 false alarm. (AC-2.9)
+- Feature availability matrix test passes: training rows use historical-forecast rain; calibration/test rows use lead-matched. (AC-2.10)
+- No leakage: no feature for row d0 uses any value after d0. (AC-2.6)
+
+**Stage 3 — Train**
+- Training aborts (exit 1, clear message) if any calibration or test row has `weather_lead_matched = False`. (AC-3.1)
+- Exactly 3 checkpoint files (one per horizon) plus one sidecar JSON written with `allow_nan=False`; checkpoint and sidecar share the same `<ts>` timestamp; both are written atomically. (AC-3.4)
+- Residual quantiles come from the calibration period only and are non-decreasing (lo95 ≤ lo80 ≤ hi80 ≤ hi95 at every percentile). (AC-3.3)
+- `make coverage` checks that calibration coverage is within ±0.02 of nominal (80 % band in [0.72, 0.88]; 95 % band in [0.90, 0.99]). A real-data failure is a documented finding (D23), not a CI break. (AC-3.6, AC-3.9)
+- A horizon where `skill_mae ≤ 0` (worse than persistence) logs a WARNING but still publishes; it must not abort training. (AC-3.8)
+- Wet/dry split coverage is computed using MRMS labels after prediction — MRMS is never a model input. (AC-3.10)
+
+**Stage 4 — Forecast**
+- `DATA_DIR=/tmp/sf-empty make forecast` prints "no checkpoint yet; skipping forecast" and exits 0. (AC-4.4)
+- `stale_days` 1–2: forecast is written with a WARNING. `stale_days > 2`: refused, exits 1, previous forecast file byte-identical (no new content written). (AC-4.5)
+- `fc_fetched_date` must equal `local_today()`; stale forecast weather → refused, exits 1. (AC-4.10)
+- Fewer than 3 available forecast days → refused, exits 1. (AC-4.7)
+- Every refusal leaves the previous `data/forecasts/` file untouched; the file written on the last good run is byte-identical after any refusal. (AC-4.11)
+- Every output row satisfies `lo95 ≤ lo80 ≤ median ≤ hi80 ≤ hi95` and all values are ≥ 0 cfs. (AC-4.2, AC-4.3)
+
+**Stage 5 — Dashboard**
+- KPIs use the sidecar whose `model_version` matches the displayed forecast's `model_version`, not the newest sidecar on disk. (AC-5.1)
+- Forecast points with `valid_date < local_today()` are drawn greyed out and labelled "past". (AC-5.5)
+- Chart title states a finding ("Flow expected to rise to about X cfs by Friday"), not a variable name or stage label. (AC-5.3)
+- No more than 3 KPI tiles visible at once. (AC-5.4)
+- `DATA_DIR` pointed at an empty directory: dashboard shows "No forecast yet", no traceback. (AC-5.6)
+
+**Stage 6 — Containers**
+- `docker compose exec dashboard id -u` prints `1000` (not `0`). (AC-6.4)
+- `docker compose ps` shows the dashboard service as `(healthy)`. (AC-6.5)
+- `docker compose run --rm pipeline make test` exits 0. (AC-6.8)
+- `make pipeline` (`--once`) exits with Forecast's exit code; if Forecast refuses, the whole pipeline reports failure even if earlier stages succeeded. (AC-6.10)
+- `docker compose down && docker compose up` — forecast files are still present; data persists on the named volume. (AC-6.7)
+- **If the agent's environment has no Docker:** it must explicitly mark AC-6.4 through AC-6.8 "not verified" rather than guessing or omitting them. You verify these at Gate 2.
 
 ### B3 · Review prompts (your follow-ups between stages)
+Intro: Use these after each stage to dig in. The AC IDs below are real — substitute the number from the stage you just built.
+
 PROMPT B3-a:
 ```
-Show me the specific test that proves AC-{N}.{x}, and explain what would make it fail.
+Show me the specific test that proves AC-{N}.{x}, and explain what would make it fail. Walk through the assertion: if the code had the bug the AC guards against, which line in the test would raise?
 ```
+
 PROMPT B3-b:
 ```
 This doesn't match docs/plan.md: [what you noticed]. Either fix the code to match the plan, or explain why the plan is wrong. If the plan is wrong, don't edit it. Tell me, and I'll take it back to the plan.
 ```
+
 PROMPT B3-c:
 ```
 Explain why you chose [library / approach] here instead of [alternative]. Keep it to the trade-off that matters for this project.
 ```
+
 PROMPT B3-d:
 ```
 This is more complicated than it needs to be: [file or function]. Simplify it without changing behavior, then rerun lint and tests.
+```
+
+Targeted follow-ups (use the one that fits the stage you just reviewed):
+
+PROMPT B3-e (Stage 0 — time helper):
+```
+Show me the test for `paths.local_today()`. Verify it respects `AS_OF_DATE` and falls back to the local New York timezone, never UTC. Then grep the whole codebase for `date.today()` and show me the output.
+```
+
+PROMPT B3-f (Stage 1 — fixture mode):
+```
+Run `INGEST_SOURCE=fixtures AS_OF_DATE=2026-09-23 make ingest` with network disabled. Paste the output. Then remove `AS_OF_DATE` and run again — confirm it exits 1 with an error about the missing variable.
+```
+
+PROMPT B3-g (Stage 2 — lead-matched rain):
+```
+Show me a feature-table row from 2024-02-01 and one from 2023-12-31. Confirm `weather_lead_matched` is True for the 2024 row and False for the 2023 row. Show the code that sets this flag.
+```
+
+PROMPT B3-h (Stage 3 — interval ordering):
+```
+After training, run a quick sanity check: for 100 random rows from the calibration set, assert `lo95 ≤ lo80 ≤ hi80 ≤ hi95` at every row. Paste the assertion and the result.
+```
+
+PROMPT B3-i (Stage 4 — refusal safety):
+```
+Simulate a stale-USGS refusal: set `AS_OF_DATE` to a date 3 days after the last raw file, run `make forecast`, and show me the exit code and the diff of `data/forecasts/` before and after (should be identical).
+```
+
+PROMPT B3-j (Stage 5 — version matching):
+```
+Show me the code that selects the sidecar to display KPIs. If I have two sidecars on disk with different `model_version` values and the forecast was produced with the older one, which sidecar does the dashboard use?
 ```
 
 ### B4 · Close
