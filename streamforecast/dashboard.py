@@ -384,7 +384,7 @@ def kpis(forecast: pd.DataFrame, metrics: dict | None) -> list[tuple[str, str, s
     median = float(t1["median_cfs"])
     tiles = [
         (
-            f"Tomorrow's median ({date.fromisoformat(t1['valid_date']):%a %b %d})",
+            f"t+1 median ({date.fromisoformat(t1['valid_date']):%a %b %d})",
             f"{about(median)} cfs",
             f"80% range {about(float(t1['lo80_cfs']))}–"
             f"{about(float(t1['hi80_cfs']))} cfs",

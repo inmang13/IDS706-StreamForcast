@@ -76,6 +76,22 @@ def test_fit_uses_train_rows_only(table):
     assert np.array_equal(train.predict(model, probe), train.predict(model2, probe))
 
 
+def test_train_fits_on_train_rows_only(table):
+    """TF14: train() itself (not just fit_horizon) ignores calibration targets when
+    fitting: changing them moves the quantiles but not the model."""
+    from streamforecast import logs
+
+    log = logs.get_logger("train", config.Settings(log_level="ERROR"))
+    a, _ = train.train(table, None, SETTINGS, log)
+    changed = table.copy()
+    cal = (changed["date"] >= "2024-02-01") & (changed["date"] <= "2024-12-31")
+    changed.loc[cal, "y_1"] += 5.0
+    b, _ = train.train(changed, None, SETTINGS, log)
+    probe = table.loc[table["date"] >= "2025-01-01", train.FEATURE_COLUMNS].to_numpy()
+    assert np.array_equal(a["models"][1].predict(probe), b["models"][1].predict(probe))
+    assert a["residual_quantiles"][1] != b["residual_quantiles"][1]
+
+
 def test_models_use_hgb_defaults_with_seed(table):
     model = train.fit_horizon(train.split_by_date(table, 1, SETTINGS)["train"], 1)
     params = model.get_params()

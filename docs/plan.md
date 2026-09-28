@@ -150,6 +150,8 @@ Locally, the same stages run one at a time with `make ingest`, `make features`, 
 | D31 | AC-1.9 completeness rule: a previous-runs local date is complete when all 24 of its Open-Meteo hourly values are present and non-null. This replaces "23, 24, or 25 hours on DST-change days". | Request `timezone=GMT` and aggregate to true local days with 23/25-hour DST days (differs from how Open-Meteo builds the daily sums used everywhere else). | Student (accepted the Builder's recommendation after Stage 1) | Verified 2026-09-24: Open-Meteo applies one fixed UTC offset per response, so every local date, DST days included, has exactly 24 hours. The rule keeps lead-1/lead-2 rain on the same day boundaries as historical-forecast and forecast daily sums. |
 | D32 | AC-2.5 lag-0 check: on the first day flow rises more than 10x (2025-07-06), `precip_0` is at least 25 mm and that day is the window's wettest. This replaces "the first day with at least 25 mm equals the first 10x rise". All exact values in AC-2.5 are still asserted. | Keep the wording and search from 2025-07-04 (B); re-record the fixture from 07-04 (C). | Student (accepted the Builder's recommendation after Stage 2) | The literal rule is false on the recorded data: 2025-07-02 had 35.7 mm (MRMS 39.6) with a same-day 2.8x rise on dry soil, so the first 25 mm day is 07-02. The replacement tests the same claim from the flow side. The GMT control still fails it (7.9 mm on the jump day; wettest day 07-07). B and C would pick a window after seeing the data. |
 | D33 | Dashboard chart (amends the Stage 5 "linear axis by default" note and extends AC-5.2): flow is drawn on a **log y-axis** (`cfs (log scale)`), with values below 0.1 cfs drawn at 0.1 and tooltips showing true values. Daily **rain hangs upside down from the top of the same plot** (a hyetograph on its own reversed right-hand axis running to 3x the wettest day, so bars fill the top third; no horizontal gridlines): Open-Meteo daily rain (`precip_0`) for the 60 days, plus the forecast rain the model used (`precip_f1..f3` of the live features row) for d0+1..d0+3. Both come from the features file, so AC-5.1's allowed files are unchanged. | Linear axis with an optional log toggle (the plan's default); no rain panel. | Student (requested at the Stage 5 smoke test) | Flow spans 7 to 200+ cfs in the 60-day window, so on a linear axis the current low flow and the forecast fan were squashed against the bottom. Showing the rain next to the flow explains the rises, and shows the forecast rain the bands depend on (RK3). |
+| D34 | The first dashboard KPI tile reads "t+1 median (<valid date>)" instead of "Tomorrow's median (<valid date>)". This amends AC-5.4's wording "tomorrow's median (t+1)". | Keep "Tomorrow's median"; "Today's median". | Student (Gate 3, Tester finding TF4) | Under D4, t+1 is today on a normal run (d0 = yesterday), so "tomorrow" was wrong on almost every day it was shown. "t+1" matches the plan's notation, and the date in parentheses says which day. |
+| D35 | Accept the real-data under-coverage on flood and wet days (Tester finding TF2) under D23 step 4, and close it. High-flow 80% band coverage is 0.14–0.25 (95% band 0.64–0.79, n = 28), and wet-window 80% band coverage is 0.39–0.54 (h = 1..3, test split, model 20260925T003936Z). No retuning; the D19 tolerances are unchanged. | Try D23's one allowed alternative; widen the tolerances or recalibrate on test (both forbidden by AC-3.9). | Student (Gate 3) | Every AC-3.9 gate passes (overall coverage 0.80–0.84 / 0.96). The misses are the known limitation in RK6 (335 calibration days with 6 days at or above the 99th percentile), made worse by forecast-rain error on wet days (RK3c). The dashboard's RK6 caption already tells users the bands are too narrow during storms. |
 
 ### Revisit later
 
@@ -381,9 +383,9 @@ Fetch USGS daily mean discharge, Open-Meteo historical-forecast weather (past), 
 - [x] AC-1.3 USGS CSV columns: `date, flow_cfs, approval_status, qualifier, last_modified`. Sorted ascending by date even when the API returns rows unordered. `flow_cfs` is float. `qualifier` is a `;`-joined string or empty. Only `statistic_id=00003` is requested.
 - [x] AC-1.4 Weather CSV columns: `date, precip_mm, tmax_c, tmin_c, source, fetched_at_utc`, with `source ∈ {historical_forecast, forecast}`. The forecast file holds the 7 past days plus 3 forecast days. If the forecast endpoint returns fewer than 3 future days (today onward) or null values, the file is still written with what came back, and a WARNING `forecast returned N of 3 days` is logged (Forecast decides; AC-4.7). Every request uses `timezone=America/New_York`.
 - [x] AC-1.5 All HTTP goes through one function with a timeout, `HTTP_RETRIES` attempts, and exponential backoff on 429/5xx/connection errors. A `Retry-After` header is honoured, capped at 60 s.
-- [ ] AC-1.6 *(Tester, Gate 3: Partial, TF1)* On final failure (HTTP error, Open-Meteo `{"error": true}` body, or malformed JSON), ingest logs an ERROR naming the source and reason, writes no partial file for that source, still attempts the other sources, and exits non-zero. An empty USGS response (`features: []`) is logged as WARNING, writes no file, and is not a crash.
+- [x] AC-1.6 *(Tester: Partial at Gate 3 (TF1); fixed and re-verified 2026-09-28, see Stage 6 Review findings)* On final failure (HTTP error, Open-Meteo `{"error": true}` body, or malformed JSON), ingest logs an ERROR naming the source and reason, writes no partial file for that source, still attempts the other sources, and exits non-zero. An empty USGS response (`features: []`) is logged as WARNING, writes no file, and is not a crash.
 - [x] AC-1.7 `INGEST_SOURCE=fixtures AS_OF_DATE=2026-09-23 make ingest` produces the same five file types from `tests/fixtures/` with no network access. In fixture mode, `fetched_at_utc` is stamped as 12:00 America/New_York on `AS_OF_DATE`, so fixture-mode data look fresh to Forecast on that date regardless of the real date. Fixture mode without `AS_OF_DATE` exits 1 with a clear error.
-- [ ] AC-1.11 *(Tester, Gate 3: Partial, TF1)* **MRMS (verification source, D24).**
+- [x] AC-1.11 *(Tester: Partial at Gate 3 (TF1); fixed and re-verified 2026-09-28, see Stage 6 Review findings)* **MRMS (verification source, D24).**
   - Fetched from IEM `iemre/multiday` in one calendar-year chunk per request.
   - Incremental: a year that is already complete isn't re-requested, and the current year is re-requested from `max(existing date) − 7 days`.
   - Written to `raw/mrms/mrms_<ts>.csv` with columns `date, precip_mm, source, fetched_at_utc`, where `precip_mm = mrms_precip_in × 25.4` and `source = iem_mrms`.
@@ -393,7 +395,7 @@ Fetch USGS daily mean discharge, Open-Meteo historical-forecast weather (past), 
 - [x] AC-1.10 **Timezone pinning.** Every Open-Meteo request (forecast, historical-forecast, previous-runs) includes `timezone=America/New_York`, taken from `TIMEZONE`. Ingest checks that the response's `timezone` field equals the requested value; on a mismatch it logs an ERROR `timezone mismatch: requested America/New_York, got <tz>` and writes no file for that source. USGS `time` and Open-Meteo `daily.time` are written verbatim as `YYYY-MM-DD` strings: never parsed as timestamps, never localized, never converted to UTC.
 - [x] AC-1.9 Previous-runs CSV `raw/weather_leads/weather_leads_<ts>.csv` has columns `date, lead_days, precip_mm, n_hours, fetched_at_utc`, with `lead_days ∈ {1, 2}`, from hourly `precipitation_previous_day1` and `precipitation_previous_day2` requested with `timezone=America/New_York`. `precip_mm` is the sum of the hourly values on that local date. It is written only when every hour of that date is present and non-null (`n_hours` equals 23, 24, or 25 on DST-change days, as appropriate); otherwise it is NaN, and a WARNING counts the incomplete days.
 - [x] AC-1.8 Files are written atomically with `paths.atomic_write` (AC-0.9), so a crash never leaves a half-written CSV that matches the pattern.
-- [ ] AC-1.12 *(Tester, Gate 3: Partial, TF1)* **Response validation (D26).** Before writing, ingest checks each response; a failure is handled as a source failure (AC-1.6).
+- [x] AC-1.12 *(Tester: Partial at Gate 3 (TF1); fixed and re-verified 2026-09-28, see Stage 6 Review findings)* **Response validation (D26).** Before writing, ingest checks each response; a failure is handled as a source failure (AC-1.6).
   - **Units:**
     - Open-Meteo `daily_units` must be `mm` for precipitation and `°C` for temperatures.
     - Previous-runs `hourly_units` must be `mm`.
@@ -1364,3 +1366,59 @@ Wet-window 95% coverage from the sidecar: 0.774 (h=1, n=62), 0.864 (h=2, n=118),
 | TF25 | Nit | When SIGTERM stops a running stage, the pass summary logs the raw signal code instead of `stopped`, as the Builder's deviation note 3 describes. | `pass summary: ingest=0 features=0 train=skipped forecast=-15`. | Record `stopped` when the stop event is set and the child ended from a signal. |
 
 TF4 is confirmed live: on Fri Sep 25 the tile read "Tomorrow's median (Fri Sep 25)".
+
+**Outcomes after Gate 3 (Tester, 2026-09-28).** Triage by the student; the Tester applied only the approved fixes.
+- `main` was pushed to `origin` (https://github.com/inmang13/IDS706-StreamForcast), and the first GitHub Actions run passed ("CI", main, success, run 36494727168). AC-0.6 stays unticked until the student reticks it.
+- The fixes are on branch `tester-gate3-fixes`.
+
+**Verification after the fixes:**
+- `make lint` → exit 0 (black: 39 files unchanged; flake8 silent).
+- `make test` → 410 passed. The 6 former strict xfails now pass.
+- `docker compose build` → exit 0, with a single `exporting to image` step.
+
+**Mutation check.** Each approved fix was temporarily reverted, or the behaviour broken, and its new tests failed every time:
+
+| Fix | Mutation | Tests that failed |
+|---|---|---|
+| TF1 | Catch `IngestError` only | 3 |
+| TF16 | Remove the wrap | 3 |
+| TF8b | Hard-code `timeout=30` | 1 |
+| TF8c | Write the sidecar first | 1 |
+| TF14 | Fit on train plus calibration rows | 1 |
+| TF8a | Drop the coverage WARNING | 1 |
+| TF4 | Restore the old label | 1 |
+
+**Container re-check.** Project `-p sfverify`; torn down with `down -v`, and the student's volume was untouched.
+- With no image present, `docker compose up -d` built once and started both services, and the dashboard became `(healthy)`.
+- The dashboard mount is `rw=false`, and `touch /data/.w` → `Read-only file system`. The pipeline mount stays `rw=true`.
+- A headless render inside the dashboard container raised no exception, with the tile reading `t+1 median (Mon Sep 28)`.
+- `/app` contains no `.vscode`, `.github`, `*.log`, or `docs/*.txt`.
+- Side note (not a regression): the pipeline service still logs one "pull access denied" line before it builds, because it has both `image:` and `build:`. `pull_policy: build` on `pipeline` would silence it; not applied, since it was not in the approved list.
+
+| ID | Severity | Triage | Outcome | Evidence |
+|---|---|---|---|---|
+| TF1 | Major | Fix | **Fixed.** `ingest.main()` catches `KeyError`, `TypeError`, and `ValueError` per source, next to `IngestError`, and logs `<source>: malformed response (<Error>: …); no file written`. MRMS still never changes the exit status. AC-1.6, 1.11, and 1.12 re-ticked. | `test_wrong_shape_response_fails_only_that_source` ×3 now pass, asserting the ERROR line, that the other sources were written, and the exit status. |
+| TF2 | Major | Don't fix (D23) | **Closed, accepted as D35.** High-flow 80% band 0.14–0.25; wet 80% band 0.39–0.54 (RK6, RK3c). The dashboard caption already warns users. No retuning, and tolerances are unchanged. | The `make coverage` table in this section; D35. |
+| TF3 | Minor | Don't fix | **Open, by design.** AC-0.6 stays unticked; the student reticks it. CI is now green on `main`. | Actions run 36494727168: success. |
+| TF4 | Minor | Student decision | **Changed as decided.** The tile label is now `t+1 median (<valid date>)` (`dashboard.py:387`). Recorded as D34. | `test_app_renders_with_data` asserts `t+1 median (Thu Sep 24)`. |
+| TF5 | Minor | Don't fix | Accepted (out of scope). | — |
+| TF6 | Minor | Don't fix | Accepted (behaviour confirmed). | — |
+| TF7 | Minor | Don't fix | Accepted (behaviour confirmed). | — |
+| TF8 | Minor | Fix | **Fixed.** Added three tests: `test_warns_when_coverage_check_fails` (AC-3.8), `test_every_request_carries_the_configured_timeout` (AC-1.5), and `test_publish_writes_checkpoint_before_sidecar` (AC-3.4). | Each fails under its mutation (above). |
+| TF9 | Minor | Don't fix | Accepted. A real SIGTERM was verified at 1.4 s (container check). | — |
+| TF10 | Nit | Don't fix | Accepted. | — |
+| TF11 | Nit | Don't fix | Left for the Architect. | — |
+| TF12 | Nit | Don't fix | Declined. | — |
+| TF13 | Nit | Fix | **Fixed.** `.dockerignore` adds `docs/*.txt`, `.vscode/`, `.github/`, and `*.log`. | `ls -A /app` and `ls /app/docs` in the rebuilt image. |
+| TF14 | Minor | Fix | **Fixed.** Added `test_train_fits_on_train_rows_only` on `train.train()`. | It fails when `train()` fits on train plus calibration rows. |
+| TF15 | Minor | Fix | **Fixed.** The AC-0.8 grep also catches a naive `datetime.now()`, `.utcnow(`, and `Timestamp.now/today(`, with 11 parametrized regex cases. Only the test file itself is excluded, since it holds the examples. | `tests/unit/test_local_today.py`: 15 passed. The code base has no offenders. |
+| TF16 | Minor | Fix | **Fixed.** Forecast turns an `AttributeError`, `KeyError`, `TypeError`, or `ValueError` from a loaded checkpoint into a refusal: `ERROR forecast <model file> is unusable: …`, exit 1, nothing written (AC-4.6). | `test_loadable_but_broken_checkpoint_refuses_cleanly` ×3 now pass. |
+| TF17 | Major | Fix (first) | **Fixed.** Branch renamed `master` → `main`; base commit `92d0d45` pushed to `origin/main`; README Install now starts with `git clone https://github.com/inmang13/IDS706-StreamForcast.git` and `cd IDS706-StreamForcast`. | `git push -u origin main` → `[new branch] main -> main`; CI green. |
+| TF18 | Minor | Don't fix | Declined. | — |
+| TF19 | Minor | Don't fix | Declined. | — |
+| TF20 | Nit | Don't fix | Declined. | — |
+| TF21 | Minor | Fix | **Fixed.** Only `pipeline` has `build:`. `dashboard` uses `image: streamforecast:latest` with `pull_policy: never`, so Compose never looks for it on Docker Hub. | A fresh `up` with no image present built once, and both services started. `docker compose build` shows a single export. |
+| TF22 | Nit | Don't fix | Declined. | — |
+| TF23 | Nit | Fix | **Fixed.** The dashboard mounts `sfdata:/data:ro`. | `rw=false`; `touch` → `Read-only file system`; dashboard healthy and renders. |
+| TF24 | Nit | Don't fix | Declined. | — |
+| TF25 | Nit | Don't fix | Declined. | — |

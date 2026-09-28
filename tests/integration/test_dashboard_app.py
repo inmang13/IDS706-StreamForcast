@@ -111,6 +111,7 @@ def test_app_renders_with_data(page):
     assert len(at.metric) == 3
     test = sidecar["horizons"]["1"]["test"]
     assert at.metric[0].value == "8.7 cfs"
+    assert at.metric[0].label == "t+1 median (Thu Sep 24)"  # TF4
     assert at.metric[1].value == f"{test['skill_mae']:+.2f}"
     assert at.metric[2].value == f"{test['coverage_80']:.0%}"
     (spec,) = chart_specs(at)

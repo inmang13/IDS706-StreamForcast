@@ -12,6 +12,13 @@ pytestmark = pytest.mark.unit
 # 2026-09-23 23:30 America/New_York (EDT) is 2026-09-24 03:30 UTC.
 FROZEN_UTC = datetime(2026, 9, 24, 3, 30, tzinfo=timezone.utc)
 
+# Calendar "today" from anything but paths.local_today(): date/datetime.today(),
+# a naive datetime.now(), utcnow(), or pandas' Timestamp.now/today/utcnow.
+CLOCK_CALLS = re.compile(
+    r"\bdate(time)?\.today\(|\bdatetime\.now\(\s*\)|\.utcnow\(|"
+    r"\bTimestamp\.(now|today)\("
+)
+
 
 class FrozenDatetime(datetime):
     @classmethod
@@ -56,6 +63,32 @@ def test_no_module_calls_date_today():
     offenders = [
         str(p)
         for p in sources
-        if re.search(r"\bdate(time)?\.today\(", p.read_text(encoding="utf-8"))
+        if p.resolve() != Path(__file__).resolve()  # this file holds examples
+        and CLOCK_CALLS.search(p.read_text(encoding="utf-8"))
     ]
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "date.today()",
+        "datetime.today()",
+        "datetime.now()",
+        "datetime.now( )",
+        "datetime.utcnow()",
+        "pd.Timestamp.now()",
+        "pd.Timestamp.today()",
+        "pd.Timestamp.utcnow()",
+    ],
+)
+def test_clock_grep_catches_local_and_naive_clocks(source):
+    """TF15: the grep must catch every clock call that bypasses local_today()."""
+    assert CLOCK_CALLS.search(source)
+
+
+@pytest.mark.parametrize(
+    "source", ["datetime.now(timezone.utc)", "datetime.now(ZoneInfo(tz))", "now(tz)"]
+)
+def test_clock_grep_allows_zone_aware_now(source):
+    assert not CLOCK_CALLS.search(source)

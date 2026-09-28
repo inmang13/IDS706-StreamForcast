@@ -38,8 +38,9 @@ services:
     stop_grace_period: 15s
 
   dashboard:
-    build: .
+    # Reuses the image the pipeline service builds (one build, one tag).
     image: streamforecast:latest
+    pull_policy: never
     command:
       - streamlit
       - run
@@ -52,7 +53,7 @@ services:
     ports:
       - "${DASHBOARD_PORT:-8501}:8501"
     volumes:
-      - sfdata:/data
+      - sfdata:/data:ro  # the dashboard only reads (AC-5.1)
     restart: unless-stopped
     healthcheck:
       # No curl in the slim image: use Python's urllib.

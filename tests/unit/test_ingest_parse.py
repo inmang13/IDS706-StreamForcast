@@ -403,6 +403,18 @@ def test_retry_after_honoured_and_capped(run, sleeps):
     assert sleeps == [5.0, 60.0]
 
 
+def test_every_request_carries_the_configured_timeout(run, sleeps, monkeypatch):
+    """AC-1.5: the timeout comes from HTTP_TIMEOUT_S, on retries too."""
+    monkeypatch.setenv("HTTP_TIMEOUT_S", "7")
+    settings = config.load()
+    with responses.RequestsMock() as rsps:
+        rsps.get(URL, status=503)
+        rsps.get(URL, json={"ok": 1})
+        ingest.http_get_json(URL, None, None, settings, run.log, "test")
+        timeouts = [c.request.req_kwargs["timeout"] for c in rsps.calls]
+    assert timeouts == [7, 7]
+
+
 def test_final_failure_raises_after_all_attempts(run, sleeps):
     with responses.RequestsMock() as rsps:
         rsps.get(URL, status=429)

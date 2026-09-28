@@ -672,8 +672,14 @@ def main(argv: list[str] | None = None) -> int:
             continue
         try:
             ingest_source(run)
-        except IngestError as exc:
-            log.error("%s: %s; no file written", name, exc)
+        except (IngestError, KeyError, TypeError, ValueError) as exc:
+            # A response of the wrong shape fails only its own source (AC-1.6, 1.12).
+            reason = (
+                exc
+                if isinstance(exc, IngestError)
+                else f"malformed response ({type(exc).__name__}: {exc})"
+            )
+            log.error("%s: %s; no file written", name, reason)
             if name != "mrms":
                 failed.append(name)
     if failed:

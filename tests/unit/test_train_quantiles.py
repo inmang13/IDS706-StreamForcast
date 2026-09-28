@@ -216,6 +216,47 @@ def test_warns_when_no_skill(capsys):
     assert checkpoint["models"]  # still trained and publishable
 
 
+def test_warns_when_coverage_check_fails(capsys):
+    """AC-3.8: an out-of-tolerance coverage check is a WARNING; training still ends."""
+    from conftest import make_synthetic_features
+
+    table = make_synthetic_features()
+    rng = np.random.default_rng(7)
+    test_rows = table["date"] > SETTINGS.calibration_end.isoformat()
+    table.loc[test_rows, "y_1"] += rng.normal(0, 1.0, test_rows.sum())
+    checkpoint, sidecar = train.train(table, None, SETTINGS, logs.get_logger("train"))
+    assert sidecar["horizons"]["1"]["test"]["coverage_80"] < 0.72
+    assert "WARNING train h=1 coverage check: test coverage_80" in (
+        capsys.readouterr().err
+    )
+    assert checkpoint["models"]
+
+
+def test_publish_writes_checkpoint_before_sidecar(trained, tmp_data_dir, monkeypatch):
+    """AC-3.4: model first, sidecar last, each atomically; a reader never sees a
+    sidecar without its checkpoint."""
+    from pathlib import Path
+
+    from streamforecast import paths
+
+    _, checkpoint, sidecar = trained
+    real = paths.atomic_write
+    writes = []
+
+    def spy(path, write_fn):
+        others = sorted(p.name for p in Path(path).parent.glob("*"))
+        writes.append((Path(path).name, others))
+        return real(path, write_fn)
+
+    monkeypatch.setattr(paths, "atomic_write", spy)
+    model_path, metrics_path = train.publish(
+        checkpoint, sidecar, Path("features_x.csv"), config.load()
+    )
+    assert [name for name, _ in writes] == [model_path.name, metrics_path.name]
+    assert writes[0][1] == []  # nothing published before the checkpoint
+    assert writes[1][1] == [model_path.name]  # the checkpoint exists first
+
+
 # --- AC-3.9 report thresholds ------------------------------------------------------
 
 
