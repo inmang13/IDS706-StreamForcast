@@ -1,10 +1,8 @@
 """Tester edge cases (Gate 3): break the pipeline with recorded fixtures, no network.
 
 Each test drives the real stage entry points (ingest.main, features.run,
-forecast.main) on a temporary DATA_DIR. Tests marked ``xfail(strict=True)`` document
-a defect found in review (see docs/plan.md, Stage 6 Review findings). They flip to
-XPASS, and fail the suite, once the defect is fixed, so the marker must be removed
-along with the fix.
+forecast.main) on a temporary DATA_DIR. The TF1 and TF16 cases were strict xfails
+until their fixes landed (see docs/plan.md, Stage 6 Review findings).
 """
 
 import math
@@ -334,11 +332,6 @@ def bad_quantile_keys(c):
     c["residual_quantiles"][1] = {"0.5": 0.0}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="TF16: a checkpoint that loads but has bad contents escapes as a "
-    "traceback instead of AC-4.6's ERROR naming the file",
-)
 @pytest.mark.parametrize(
     "damage",
     [bad_model, bad_feature_columns, bad_quantile_keys],
@@ -350,8 +343,9 @@ def test_loadable_but_broken_checkpoint_refuses_cleanly(
     model = install_checkpoint()
     rewrite(model, damage)
     run_features()
-    assert forecast.main() == 1  # an uncaught exception fails here
-    assert model.name in capsys.readouterr().err
+    assert forecast.main() == 1
+    assert not list((tmp_data_dir / "forecasts").glob("*"))
+    assert f"ERROR forecast {model.name} is unusable:" in capsys.readouterr().err
 
 
 def test_disordered_quantiles_are_refused_not_published(
@@ -499,11 +493,6 @@ def _mrms_none_record(load_fixture):
     return {MRMS_RE: data}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="TF1: a wrong-shape JSON response raises past main(), so later sources "
-    "are skipped and MRMS can change the exit status",
-)
 @pytest.mark.parametrize(
     "broken, failed_kind, expected_exit",
     [
@@ -514,7 +503,7 @@ def _mrms_none_record(load_fixture):
     ids=["usgs-missing-time", "hist-null-array", "mrms-none-record"],
 )
 def test_wrong_shape_response_fails_only_that_source(
-    tmp_data_dir, load_fixture, monkeypatch, broken, failed_kind, expected_exit
+    tmp_data_dir, load_fixture, monkeypatch, capsys, broken, failed_kind, expected_exit
 ):
     monkeypatch.setenv("AS_OF_DATE", "2026-09-24")
     monkeypatch.setenv("HISTORY_START", "2026-09-01")
@@ -526,3 +515,8 @@ def test_wrong_shape_response_fails_only_that_source(
     for kind in ("usgs", "weather_hist", "weather_leads", "weather_fc", "mrms"):
         n = len(list((tmp_data_dir / "raw" / kind).glob("*.csv")))
         assert n == (0 if kind == failed_kind else 1), kind
+    assert re.search(
+        rf"ERROR ingest {failed_kind}: malformed response \(\w+Error: .*\); "
+        "no file written",
+        capsys.readouterr().err,
+    )

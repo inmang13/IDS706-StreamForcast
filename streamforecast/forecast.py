@@ -209,9 +209,15 @@ def run(settings: config.Settings, log: Logger) -> int:
                 f" ({row['qualifier']})" if pd.notna(row["qualifier"]) else "",
             )
         now = paths.utc_now()
-        out = make_forecast(
-            checkpoint, row, stale_days, now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        )
+        try:
+            out = make_forecast(
+                checkpoint, row, stale_days, now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            # A checkpoint that loads but has broken contents (AC-4.6).
+            raise Refusal(
+                f"{model_path.name} is unusable: {type(exc).__name__}: {exc}"
+            ) from None
     except Refusal as exc:
         log.error("%s", exc)
         return 1

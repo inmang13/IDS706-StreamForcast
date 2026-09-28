@@ -12,3 +12,7 @@ build/
 *.tmp
 .env
 .claude/
+docs/*.txt
+.vscode/
+.github/
+*.log
